@@ -382,21 +382,25 @@ impl CmpMap for CmpLogMap {
                         self.vals.operands[idx][execution].0 as u8,
                         self.vals.operands[idx][execution].1 as u8,
                         self.vals.operands[idx][execution].2 == 1,
+                        idx,
                     ))),
                     2 => Some(CmpValues::U16((
                         self.vals.operands[idx][execution].0 as u16,
                         self.vals.operands[idx][execution].1 as u16,
                         self.vals.operands[idx][execution].2 == 1,
+                        idx,
                     ))),
                     4 => Some(CmpValues::U32((
                         self.vals.operands[idx][execution].0 as u32,
                         self.vals.operands[idx][execution].1 as u32,
                         self.vals.operands[idx][execution].2 == 1,
+                        idx,
                     ))),
                     8 => Some(CmpValues::U64((
                         self.vals.operands[idx][execution].0,
                         self.vals.operands[idx][execution].1,
                         self.vals.operands[idx][execution].2 == 1,
+                        idx,
                     ))),
                     // other => panic!("Invalid CmpLog shape {}", other),
                     _ => None,
@@ -413,6 +417,7 @@ impl CmpMap for CmpLogMap {
                         self.vals.routines[idx][execution].1,
                         CMPLOG_RTN_LEN as u8,
                     ),
+                    idx,
                 )))
             }
         }
@@ -574,21 +579,25 @@ impl CmpMap for AflppCmpLogMap {
                         self.vals.operands[idx][execution].v0 as u8,
                         self.vals.operands[idx][execution].v1 as u8,
                         false,
+                        idx,
                     ))),
                     1 => Some(CmpValues::U16((
                         self.vals.operands[idx][execution].v0 as u16,
                         self.vals.operands[idx][execution].v1 as u16,
                         false,
+                        idx,
                     ))),
                     3 => Some(CmpValues::U32((
                         self.vals.operands[idx][execution].v0 as u32,
                         self.vals.operands[idx][execution].v1 as u32,
                         false,
+                        idx,
                     ))),
                     7 => Some(CmpValues::U64((
                         self.vals.operands[idx][execution].v0,
                         self.vals.operands[idx][execution].v1,
                         false,
+                        idx,
                     ))),
                     // TODO handle 128 bits & 256 bits cmps
                     // other => panic!("Invalid CmpLog shape {}", other),
@@ -602,6 +611,7 @@ impl CmpMap for AflppCmpLogMap {
                 Some(CmpValues::Bytes((
                     CmplogBytes::from_buf_and_len(self.vals.fn_operands[idx][execution].v0, v0_len),
                     CmplogBytes::from_buf_and_len(self.vals.fn_operands[idx][execution].v1, v1_len),
+                    idx,
                 )))
             }
         }

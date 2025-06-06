@@ -477,7 +477,7 @@ where
 
         let mut result = MutationResult::Skipped;
         match cmp_values {
-            CmpValues::U8((v1, v2, v1_is_const)) => {
+            CmpValues::U8((v1, v2, v1_is_const, _)) => {
                 for byte in bytes.iter_mut().take(len).skip(off) {
                     if !v1_is_const && *byte == *v1 {
                         *byte = *v2;
@@ -490,7 +490,7 @@ where
                     }
                 }
             }
-            CmpValues::U16((v1, v2, v1_is_const)) => {
+            CmpValues::U16((v1, v2, v1_is_const, _)) => {
                 if len >= size_of::<u16>() {
                     for i in off..=len - size_of::<u16>() {
                         let val =
@@ -519,7 +519,7 @@ where
                     }
                 }
             }
-            CmpValues::U32((v1, v2, v1_is_const)) => {
+            CmpValues::U32((v1, v2, v1_is_const, _)) => {
                 if len >= size_of::<u32>() {
                     for i in off..=len - size_of::<u32>() {
                         let val =
@@ -548,7 +548,7 @@ where
                     }
                 }
             }
-            CmpValues::U64((v1, v2, v1_is_const)) => {
+            CmpValues::U64((v1, v2, v1_is_const, _)) => {
                 if len >= size_of::<u64>() {
                     for i in off..=len - size_of::<u64>() {
                         let val =

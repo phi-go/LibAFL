@@ -185,6 +185,7 @@ impl TryInto<CmpValues> for RedqueenEvent {
                     *self.rhs.first().ok_or("Invalid RHS length for U8")?,
                     *self.lhs.first().ok_or("Invalid LHS length for U8")?,
                     self.imm,
+                    0,
                 ))),
                 16 => Ok(CmpValues::U16((
                     u16::from_be_bytes(
@@ -198,6 +199,7 @@ impl TryInto<CmpValues> for RedqueenEvent {
                             .map_err(|_| "Invalid LHS length for U16")?,
                     ),
                     self.imm,
+                    0,
                 ))),
                 32 => Ok(CmpValues::U32((
                     u32::from_be_bytes(
@@ -211,6 +213,7 @@ impl TryInto<CmpValues> for RedqueenEvent {
                             .map_err(|_| "Invalid LHS length for U32")?,
                     ),
                     self.imm,
+                    0,
                 ))),
                 64 => Ok(CmpValues::U64((
                     u64::from_be_bytes(
@@ -224,6 +227,7 @@ impl TryInto<CmpValues> for RedqueenEvent {
                             .map_err(|_| "Invalid LHS length for U64")?,
                     ),
                     self.imm,
+                    0,
                 ))),
                 _ => Err("Invalid size".to_string()),
             },
