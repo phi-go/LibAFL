@@ -577,3 +577,143 @@ void __cmplog_rtn_llvm_stdstring_stdstring_extended(const uint8_t *stdstring1,
   k &= CMPLOG_MAP_W - 1;
   cmplog_routines_checked_extended(k, string_ptr1, string_ptr2, len);
 }
+
+/*
+  New CMPLOG hook functions with deterministic IDs
+  These functions accept a deterministic ID as the first parameter instead of using RETADDR
+*/
+
+void __cmplog_ins_hook1_with_id(uint32_t id, uint8_t arg1, uint8_t arg2) {
+  if (!libafl_cmplog_enabled) { return; }
+  
+  uintptr_t k = id & (CMPLOG_MAP_W - 1);
+  cmplog_instructions_checked(k, 1, arg1, arg2, 0);
+}
+
+void __cmplog_ins_hook1_with_id_extended(uint32_t id, uint8_t arg1, uint8_t arg2, uint8_t attr) {
+  if (!libafl_cmplog_enabled) { return; }
+  
+  uintptr_t k = id & (CMPLOG_MAP_W - 1);
+  cmplog_instructions_extended_checked(k, 0, arg1, arg2, attr);
+}
+
+void __cmplog_ins_hook2_with_id(uint32_t id, uint16_t arg1, uint16_t arg2) {
+  if (!libafl_cmplog_enabled) { return; }
+  
+  uintptr_t k = id & (CMPLOG_MAP_W - 1);
+  cmplog_instructions_checked(k, 2, arg1, arg2, 0);
+}
+
+void __cmplog_ins_hook2_with_id_extended(uint32_t id, uint16_t arg1, uint16_t arg2, uint8_t attr) {
+  if (!libafl_cmplog_enabled) { return; }
+  
+  uintptr_t k = id & (CMPLOG_MAP_W - 1);
+  cmplog_instructions_extended_checked(k, 1, arg1, arg2, attr);
+}
+
+void __cmplog_ins_hook4_with_id(uint32_t id, uint32_t arg1, uint32_t arg2) {
+  if (!libafl_cmplog_enabled) { return; }
+  
+  uintptr_t k = id & (CMPLOG_MAP_W - 1);
+  cmplog_instructions_checked(k, 4, arg1, arg2, 0);
+}
+
+void __cmplog_ins_hook4_with_id_extended(uint32_t id, uint32_t arg1, uint32_t arg2, uint8_t attr) {
+  if (!libafl_cmplog_enabled) { return; }
+  
+  uintptr_t k = id & (CMPLOG_MAP_W - 1);
+  cmplog_instructions_extended_checked(k, 3, arg1, arg2, attr);
+}
+
+void __cmplog_ins_hook8_with_id(uint32_t id, uint64_t arg1, uint64_t arg2) {
+  if (!libafl_cmplog_enabled) { return; }
+  
+  uintptr_t k = id & (CMPLOG_MAP_W - 1);
+  cmplog_instructions_checked(k, 8, arg1, arg2, 0);
+}
+
+void __cmplog_ins_hook8_with_id_extended(uint32_t id, uint64_t arg1, uint64_t arg2, uint8_t attr) {
+  if (!libafl_cmplog_enabled) { return; }
+  
+  uintptr_t k = id & (CMPLOG_MAP_W - 1);
+  cmplog_instructions_extended_checked(k, 7, arg1, arg2, attr);
+}
+
+#if !defined(_WIN32) && defined(__SIZEOF_INT128__)
+void __cmplog_ins_hook16_with_id(uint32_t id, uint128_t arg1, uint128_t arg2) {
+  if (!libafl_cmplog_enabled) { return; }
+  
+  uintptr_t k = id & (CMPLOG_MAP_W - 1);
+  cmplog_instructions_checked(k, 16, arg1, arg2, 0);
+}
+
+void __cmplog_ins_hook16_with_id_extended(uint32_t id, uint128_t arg1, uint128_t arg2, uint8_t attr) {
+  if (!libafl_cmplog_enabled) { return; }
+  
+  uintptr_t k = id & (CMPLOG_MAP_W - 1);
+  cmplog_instructions_extended_checked(k, 15, arg1, arg2, attr);
+}
+
+void __cmplog_ins_hookN_with_id(uint32_t id, uint128_t arg1, uint128_t arg2, uint8_t size) {
+  if (!libafl_cmplog_enabled) { return; }
+  
+  uintptr_t k = id & (CMPLOG_MAP_W - 1);
+  cmplog_instructions_checked(k, size, arg1, arg2, 0);
+}
+
+void __cmplog_ins_hookN_with_id_extended(uint32_t id, uint128_t arg1, uint128_t arg2, uint8_t attr, uint8_t size) {
+  if (!libafl_cmplog_enabled) { return; }
+  
+  uintptr_t k = id & (CMPLOG_MAP_W - 1);
+  cmplog_instructions_extended_checked(k, size - 1, arg1, arg2, attr);
+}
+
+/*
+  Enhanced hook functions with constant mask support
+  const_mask: bit 0 = arg1 is constant, bit 1 = arg2 is constant
+*/
+
+void __cmplog_ins_hook1_with_id_const(uint32_t id, uint8_t arg1, uint8_t arg2, uint8_t const_mask) {
+  if (!libafl_cmplog_enabled) { return; }
+  
+  uintptr_t k = id & (CMPLOG_MAP_W - 1);
+  cmplog_instructions_checked(k, 1, arg1, arg2, const_mask);
+}
+
+void __cmplog_ins_hook2_with_id_const(uint32_t id, uint16_t arg1, uint16_t arg2, uint8_t const_mask) {
+  if (!libafl_cmplog_enabled) { return; }
+  
+  uintptr_t k = id & (CMPLOG_MAP_W - 1);
+  cmplog_instructions_checked(k, 2, arg1, arg2, const_mask);
+}
+
+void __cmplog_ins_hook4_with_id_const(uint32_t id, uint32_t arg1, uint32_t arg2, uint8_t const_mask) {
+  if (!libafl_cmplog_enabled) { return; }
+  
+  uintptr_t k = id & (CMPLOG_MAP_W - 1);
+  cmplog_instructions_checked(k, 4, arg1, arg2, const_mask);
+}
+
+void __cmplog_ins_hook8_with_id_const(uint32_t id, uint64_t arg1, uint64_t arg2, uint8_t const_mask) {
+  if (!libafl_cmplog_enabled) { return; }
+  
+  uintptr_t k = id & (CMPLOG_MAP_W - 1);
+  cmplog_instructions_checked(k, 8, arg1, arg2, const_mask);
+}
+
+#if !defined(_WIN32) && defined(__SIZEOF_INT128__)
+void __cmplog_ins_hook16_with_id_const(uint32_t id, uint128_t arg1, uint128_t arg2, uint8_t const_mask) {
+  if (!libafl_cmplog_enabled) { return; }
+  
+  uintptr_t k = id & (CMPLOG_MAP_W - 1);
+  cmplog_instructions_checked(k, 16, arg1, arg2, const_mask);
+}
+
+void __cmplog_ins_hookN_with_id_const(uint32_t id, uint128_t arg1, uint128_t arg2, uint8_t size, uint8_t const_mask) {
+  if (!libafl_cmplog_enabled) { return; }
+  
+  uintptr_t k = id & (CMPLOG_MAP_W - 1);
+  cmplog_instructions_checked(k, size, arg1, arg2, const_mask);
+}
+#endif
+#endif

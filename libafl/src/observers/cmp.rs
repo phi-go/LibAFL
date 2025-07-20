@@ -1,5 +1,9 @@
 //! The `CmpObserver` provides access to the logged values of CMP instructions
-use alloc::{borrow::Cow, vec::Vec};
+use alloc::{
+    borrow::Cow,
+    string::{String, ToString},
+    vec::Vec,
+};
 use core::{
     fmt::Debug,
     ops::{Deref, DerefMut},
@@ -12,6 +16,395 @@ use libafl_bolts::{AsSlice, HasLen, Named, ownedref::OwnedRefMut};
 use serde::{Deserialize, Serialize};
 
 use crate::{Error, HasMetadata, executors::ExitKind, observers::Observer};
+
+/// Debug information for a cmplog location
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[repr(C)]
+pub struct CmplogDebugInfo {
+    /// Deterministic hash-based ID
+    pub id: u32,
+    /// Index into string table for source file path
+    pub file_path_index: u32,
+    /// Source line number
+    pub line: u32,
+    /// Source column number
+    pub column: u16,
+    /// Hash of function name
+    pub func_hash: u16,
+    /// Type of comparison (0=ICmp, 1=FCmp, 2=Switch)
+    pub cmp_type: u8,
+    /// Reserved for future use
+    pub reserved: u8,
+    /// Runtime address of the comparison instruction
+    pub instruction_addr: u64,
+}
+
+impl CmplogDebugInfo {
+    /// Create a new debug info entry
+    pub fn new(
+        id: u32,
+        file_path_index: u32,
+        line: u32,
+        column: u16,
+        func_hash: u16,
+        cmp_type: u8,
+        instruction_addr: u64,
+    ) -> Self {
+        Self {
+            id,
+            file_path_index,
+            line,
+            column,
+            func_hash,
+            cmp_type,
+            reserved: 0,
+            instruction_addr,
+        }
+    }
+
+    /// Get the comparison type as a string
+    pub fn cmp_type_str(&self) -> &'static str {
+        match self.cmp_type {
+            0 => "ICmp",
+            1 => "FCmp",
+            2 => "Switch",
+            _ => "Unknown",
+        }
+    }
+}
+
+/// Debug resolver for looking up cmplog debug information at runtime
+#[derive(Debug, Clone)]
+pub struct CmplogDebugResolver {
+    debug_table: HashMap<u32, CmplogDebugInfo>,
+    file_paths: Vec<String>,
+    function_names: HashMap<u16, String>,
+}
+
+impl Default for CmplogDebugResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CmplogDebugResolver {
+    /// Create a new debug resolver
+    pub fn new() -> Self {
+        Self {
+            debug_table: HashMap::new(),
+            file_paths: Vec::new(),
+            function_names: HashMap::new(),
+        }
+    }
+
+    /// Load debug information from embedded executable section
+    #[cfg(target_os = "linux")]
+    pub fn load_from_executable() -> Result<Self, Error> {
+        use core::ptr;
+
+        let mut resolver = Self::new();
+
+        // Try to load debug information using dlsym to check for symbol existence
+        // This avoids weak linkage issues and works on stable Rust
+        #[cfg(feature = "std")]
+        unsafe {
+            use std::ffi::CString;
+
+            // Helper function to load symbols from a library handle
+            let load_symbols = |lib_handle: *mut std::ffi::c_void| -> (
+                Option<*mut std::ffi::c_void>,
+                Option<*mut std::ffi::c_void>,
+                Option<*mut std::ffi::c_void>,
+                Option<*mut std::ffi::c_void>,
+                Option<*mut std::ffi::c_void>,
+            ) {
+                let table_name = CString::new("__libafl_cmplog_debug_table").unwrap();
+                let size_name = CString::new("__libafl_cmplog_debug_table_size").unwrap();
+                let string_table_name = CString::new("__libafl_cmplog_string_table").unwrap();
+                let string_offsets_name = CString::new("__libafl_cmplog_string_offsets").unwrap();
+                let string_count_name = CString::new("__libafl_cmplog_string_count").unwrap();
+
+                let table_ptr = libc::dlsym(lib_handle, table_name.as_ptr());
+                let size_ptr = libc::dlsym(lib_handle, size_name.as_ptr());
+                let string_table_ptr = libc::dlsym(lib_handle, string_table_name.as_ptr());
+                let string_offsets_ptr = libc::dlsym(lib_handle, string_offsets_name.as_ptr());
+                let string_count_ptr = libc::dlsym(lib_handle, string_count_name.as_ptr());
+
+                (
+                    if table_ptr.is_null() {
+                        None
+                    } else {
+                        Some(table_ptr)
+                    },
+                    if size_ptr.is_null() {
+                        None
+                    } else {
+                        Some(size_ptr)
+                    },
+                    if string_table_ptr.is_null() {
+                        None
+                    } else {
+                        Some(string_table_ptr)
+                    },
+                    if string_offsets_ptr.is_null() {
+                        None
+                    } else {
+                        Some(string_offsets_ptr)
+                    },
+                    if string_count_ptr.is_null() {
+                        None
+                    } else {
+                        Some(string_count_ptr)
+                    },
+                )
+            };
+
+            // Try multiple approaches to get the symbols
+            let (
+                mut table_ptr,
+                mut size_ptr,
+                mut string_table_ptr,
+                mut string_offsets_ptr,
+                mut string_count_ptr,
+            );
+
+            // First try: RTLD_DEFAULT
+            let lib_handle = libc::RTLD_DEFAULT as *mut std::ffi::c_void;
+            (
+                table_ptr,
+                size_ptr,
+                string_table_ptr,
+                string_offsets_ptr,
+                string_count_ptr,
+            ) = load_symbols(lib_handle);
+
+            // Second try: current executable
+            if table_ptr.is_none() || size_ptr.is_none() {
+                // Get current executable path and open it
+                let exe_path = std::fs::read_link("/proc/self/exe")
+                    .unwrap_or_else(|_| std::path::PathBuf::from(""));
+
+                if !exe_path.as_os_str().is_empty() {
+                    let exe_cstr = CString::new(exe_path.to_string_lossy().as_ref()).unwrap();
+                    let lib_handle = libc::dlopen(exe_cstr.as_ptr(), libc::RTLD_LAZY);
+
+                    if !lib_handle.is_null() {
+                        (
+                            table_ptr,
+                            size_ptr,
+                            string_table_ptr,
+                            string_offsets_ptr,
+                            string_count_ptr,
+                        ) = load_symbols(lib_handle);
+                        libc::dlclose(lib_handle);
+                    }
+                }
+            }
+
+            // Check if symbols were found
+            if table_ptr.is_none() || size_ptr.is_none() {
+                // No debug information embedded
+                eprintln!("debug symbols not found");
+                return Ok(resolver);
+            }
+
+            let table_ptr = table_ptr.unwrap();
+            let size_ptr = size_ptr.unwrap();
+
+            // Load string table if available
+            if let (Some(string_table_ptr), Some(string_offsets_ptr), Some(string_count_ptr)) =
+                (string_table_ptr, string_offsets_ptr, string_count_ptr)
+            {
+                let string_count = ptr::read(string_count_ptr as *const u32) as usize;
+                if string_count > 0 {
+                    eprintln!("Found {} file path strings", string_count);
+
+                    let string_data_ptr = string_table_ptr as *const u8;
+                    let offsets_ptr = string_offsets_ptr as *const u32;
+
+                    for i in 0..string_count {
+                        let offset = ptr::read(offsets_ptr.add(i)) as isize;
+                        let str_ptr = string_data_ptr.offset(offset);
+
+                        // Read null-terminated string
+                        let mut len = 0;
+                        while ptr::read(str_ptr.add(len)) != 0 {
+                            len += 1;
+                        }
+
+                        let str_bytes = core::slice::from_raw_parts(str_ptr, len);
+                        if let Ok(file_path) = std::str::from_utf8(str_bytes) {
+                            resolver.add_file_path(file_path.to_string());
+                        }
+                    }
+                }
+            }
+
+            // The table_size_ptr actually contains the number of entries, not bytes
+            let num_entries = ptr::read(size_ptr as *const u32) as usize;
+            if num_entries == 0 {
+                eprintln!("zero entries");
+                // No debug information embedded
+                return Ok(resolver);
+            }
+
+            eprintln!("Found {} debug entries", num_entries);
+            let debug_table_ptr = table_ptr as *const CmplogDebugInfo;
+
+            // Read each debug entry from the embedded table
+            for i in 0..num_entries {
+                let entry_ptr = debug_table_ptr.add(i);
+                let entry = ptr::read(entry_ptr);
+                resolver.add_debug_info(entry);
+            }
+        }
+
+        Ok(resolver)
+    }
+
+    /// Load debug information from embedded executable section
+    #[cfg(not(target_os = "linux"))]
+    pub fn load_from_executable() -> Result<Self, Error> {
+        // Platform not yet supported
+        Ok(Self::new())
+    }
+
+    /// Add a debug info entry manually (useful for testing)
+    pub fn add_debug_info(&mut self, debug_info: CmplogDebugInfo) {
+        self.debug_table.insert(debug_info.id, debug_info);
+    }
+
+    /// Load file paths from the string table
+    pub fn load_file_paths(&mut self, file_paths: Vec<String>) {
+        self.file_paths = file_paths;
+    }
+
+    /// Add a file path by index
+    pub fn add_file_path(&mut self, path: String) {
+        self.file_paths.push(path);
+    }
+
+    /// Add a function name mapping
+    pub fn add_function_name(&mut self, hash: u16, name: String) {
+        self.function_names.insert(hash, name);
+    }
+
+    /// Resolve debug information for a comparison ID
+    pub fn resolve(&self, cmp_id: u32) -> Option<&CmplogDebugInfo> {
+        self.debug_table.get(&cmp_id)
+    }
+
+    /// Resolve debug information for a masked comparison ID (CmpValuesId)
+    /// CmpValuesId = deterministic_id & (CMPLOG_MAP_W - 1)
+    pub fn resolve_masked(&self, masked_cmp_id: u32) -> Option<&CmplogDebugInfo> {
+        const CMPLOG_MAP_W: u32 = 65536; // Default value from libafl_targets
+        let mask = CMPLOG_MAP_W - 1;
+
+        // Find the debug entry whose ID when masked matches the given masked_cmp_id
+        for debug_info in self.debug_table.values() {
+            if (debug_info.id & mask) == masked_cmp_id {
+                return Some(debug_info);
+            }
+        }
+        None
+    }
+
+    /// Get the file path for a file path index
+    pub fn get_file_path(&self, file_path_index: u32) -> Option<&str> {
+        self.file_paths
+            .get(file_path_index as usize)
+            .map(|s| s.as_str())
+    }
+
+    /// Get the instruction address for a comparison ID
+    pub fn get_instruction_addr(&self, cmp_id: u32) -> Option<u64> {
+        self.debug_table
+            .get(&cmp_id)
+            .map(|info| info.instruction_addr)
+    }
+
+    /// Get the function name for a function hash
+    pub fn get_function_name(&self, func_hash: u16) -> Option<&str> {
+        self.function_names.get(&func_hash).map(|s| s.as_str())
+    }
+
+    /// Get full debug information for a comparison ID including resolved names
+    /// Uses direct resolution since both CmpValuesId and debug IDs are already masked
+    pub fn resolve_full(&self, cmp_id: u32) -> Option<CmplogDebugLocation> {
+        let debug_info = self.resolve(cmp_id)?;
+
+        Some(CmplogDebugLocation {
+            id: debug_info.id,
+            line: debug_info.line,
+            column: debug_info.column,
+            cmp_type: debug_info.cmp_type,
+            file_name: self
+                .get_file_path(debug_info.file_path_index)
+                .map(|s| s.to_string()),
+            function_name: self
+                .get_function_name(debug_info.func_hash)
+                .map(|s| s.to_string()),
+        })
+    }
+
+    /// Get all debug information entries
+    pub fn all_entries(&self) -> impl Iterator<Item = (&u32, &CmplogDebugInfo)> {
+        self.debug_table.iter()
+    }
+
+    /// Get the number of debug entries
+    pub fn len(&self) -> usize {
+        self.debug_table.len()
+    }
+
+    /// Check if the resolver is empty
+    pub fn is_empty(&self) -> bool {
+        self.debug_table.is_empty()
+    }
+}
+
+/// Full debug location information with resolved names
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CmplogDebugLocation {
+    /// Deterministic hash-based ID
+    pub id: u32,
+    /// Source line number
+    pub line: u32,
+    /// Source column number
+    pub column: u16,
+    /// Type of comparison (0=ICmp, 1=FCmp, 2=Switch)
+    pub cmp_type: u8,
+    /// Resolved file name (if available)
+    pub file_name: Option<String>,
+    /// Resolved function name (if available)
+    pub function_name: Option<String>,
+}
+
+impl CmplogDebugLocation {
+    /// Get the comparison type as a string
+    pub fn cmp_type_str(&self) -> &'static str {
+        match self.cmp_type {
+            0 => "ICmp",
+            1 => "FCmp",
+            2 => "Switch",
+            _ => "Unknown",
+        }
+    }
+
+    /// Format as a human-readable string
+    pub fn format(&self) -> String {
+        let file = self.file_name.as_deref().unwrap_or("<unknown>");
+        let func = self.function_name.as_deref().unwrap_or("<unknown>");
+        format!(
+            "{}:{} in {} ({}:{})",
+            file,
+            self.line,
+            func,
+            self.cmp_type_str(),
+            self.id
+        )
+    }
+}
 
 /// A bytes string for cmplog with up to 32 elements.
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -80,6 +473,17 @@ impl CmpValues {
             CmpValues::U32(t) => Some((u64::from(t.0), u64::from(t.1), t.2, t.3)),
             CmpValues::U64(t) => Some(*t),
             CmpValues::Bytes(_) => None,
+        }
+    }
+
+    /// Extract the ID from this comparison value
+    pub fn get_id(&self) -> u32 {
+        match self {
+            CmpValues::U8((_, _, _, id)) => *id as u32,
+            CmpValues::U16((_, _, _, id)) => *id as u32,
+            CmpValues::U32((_, _, _, id)) => *id as u32,
+            CmpValues::U64((_, _, _, id)) => *id as u32,
+            CmpValues::Bytes((_, _, id)) => *id as u32,
         }
     }
 }
@@ -176,6 +580,93 @@ impl CmpValuesMetadata {
                 }
             }
         }
+    }
+
+    /// Extract all unique comparison IDs from the collected values
+    pub fn get_cmp_ids(&self) -> Vec<u32> {
+        let mut ids = Vec::new();
+        for cmp_value in &self.list {
+            let id = match cmp_value {
+                CmpValues::U8((_, _, _, id)) => *id as u32,
+                CmpValues::U16((_, _, _, id)) => *id as u32,
+                CmpValues::U32((_, _, _, id)) => *id as u32,
+                CmpValues::U64((_, _, _, id)) => *id as u32,
+                CmpValues::Bytes((_, _, id)) => *id as u32,
+            };
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        ids
+    }
+
+    /// Get debug information for all comparisons using a debug resolver
+    pub fn resolve_debug_info(
+        &self,
+        resolver: &CmplogDebugResolver,
+    ) -> Vec<(u32, Option<CmplogDebugLocation>)> {
+        self.get_cmp_ids()
+            .into_iter()
+            .map(|id| (id, resolver.resolve_full(id)))
+            .collect()
+    }
+
+    /// Print debug information for all comparisons
+    pub fn print_debug_info(&self, resolver: &CmplogDebugResolver) {
+        let debug_info = self.resolve_debug_info(resolver);
+
+        println!("Cmplog Debug Information:");
+        println!("========================");
+
+        for (id, location) in debug_info {
+            match location {
+                Some(loc) => {
+                    println!("ID {}: {}", id, loc.format());
+                }
+                None => {
+                    println!("ID {}: <no debug info available>", id);
+                }
+            }
+        }
+
+        if self.list.is_empty() {
+            println!("No comparison values recorded.");
+        } else {
+            println!("\nTotal comparisons: {}", self.list.len());
+            println!("Unique comparison locations: {}", self.get_cmp_ids().len());
+        }
+    }
+
+    /// Get comparison values grouped by their debug location
+    pub fn group_by_location(
+        &self,
+        resolver: &CmplogDebugResolver,
+    ) -> HashMap<u32, (Option<CmplogDebugLocation>, Vec<&CmpValues>)> {
+        let mut groups: HashMap<u32, (Option<CmplogDebugLocation>, Vec<&CmpValues>)> =
+            HashMap::new();
+
+        for cmp_value in &self.list {
+            let id = match cmp_value {
+                CmpValues::U8((_, _, _, id)) => *id as u32,
+                CmpValues::U16((_, _, _, id)) => *id as u32,
+                CmpValues::U32((_, _, _, id)) => *id as u32,
+                CmpValues::U64((_, _, _, id)) => *id as u32,
+                CmpValues::Bytes((_, _, id)) => *id as u32,
+            };
+
+            let entry = groups
+                .entry(id)
+                .or_insert_with(|| (resolver.resolve_full(id), Vec::new()));
+            entry.1.push(cmp_value);
+        }
+
+        groups
+    }
+
+    /// Helper function to enable debug information collection for the current fuzzing session
+    /// This should be called after the fuzzer has been initialized to load embedded debug info
+    pub fn enable_debug_analysis(&mut self) -> Result<CmplogDebugResolver, Error> {
+        CmplogDebugResolver::load_from_executable()
     }
 }
 
