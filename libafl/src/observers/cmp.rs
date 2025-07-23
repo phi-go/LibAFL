@@ -29,8 +29,8 @@ pub struct CmplogDebugInfo {
     pub line: u32,
     /// Source column number
     pub column: u16,
-    /// Hash of function name
-    pub func_hash: u16,
+    /// Index into function name string table
+    pub func_name_index: u32,
     /// Type of comparison (0=ICmp, 1=FCmp, 2=Switch)
     pub cmp_type: u8,
     /// Reserved for future use
@@ -46,7 +46,7 @@ impl CmplogDebugInfo {
         file_path_index: u32,
         line: u32,
         column: u16,
-        func_hash: u16,
+        func_name_index: u32,
         cmp_type: u8,
         instruction_addr: u64,
     ) -> Self {
@@ -55,7 +55,7 @@ impl CmplogDebugInfo {
             file_path_index,
             line,
             column,
-            func_hash,
+            func_name_index,
             cmp_type,
             reserved: 0,
             instruction_addr,
@@ -78,7 +78,7 @@ impl CmplogDebugInfo {
 pub struct CmplogDebugResolver {
     debug_table: HashMap<u32, CmplogDebugInfo>,
     file_paths: Vec<String>,
-    function_names: HashMap<u16, String>,
+    function_names: HashMap<u32, String>,
 }
 
 impl Default for CmplogDebugResolver {
@@ -117,18 +117,33 @@ impl CmplogDebugResolver {
                 Option<*mut std::ffi::c_void>,
                 Option<*mut std::ffi::c_void>,
                 Option<*mut std::ffi::c_void>,
+                Option<*mut std::ffi::c_void>,
+                Option<*mut std::ffi::c_void>,
+                Option<*mut std::ffi::c_void>,
             ) {
                 let table_name = CString::new("__libafl_cmplog_debug_table").unwrap();
                 let size_name = CString::new("__libafl_cmplog_debug_table_size").unwrap();
                 let string_table_name = CString::new("__libafl_cmplog_string_table").unwrap();
                 let string_offsets_name = CString::new("__libafl_cmplog_string_offsets").unwrap();
                 let string_count_name = CString::new("__libafl_cmplog_string_count").unwrap();
+                let function_name_table_name =
+                    CString::new("__libafl_cmplog_function_name_table").unwrap();
+                let function_name_offsets_name =
+                    CString::new("__libafl_cmplog_function_name_offsets").unwrap();
+                let function_name_count_name =
+                    CString::new("__libafl_cmplog_function_name_count").unwrap();
 
                 let table_ptr = libc::dlsym(lib_handle, table_name.as_ptr());
                 let size_ptr = libc::dlsym(lib_handle, size_name.as_ptr());
                 let string_table_ptr = libc::dlsym(lib_handle, string_table_name.as_ptr());
                 let string_offsets_ptr = libc::dlsym(lib_handle, string_offsets_name.as_ptr());
                 let string_count_ptr = libc::dlsym(lib_handle, string_count_name.as_ptr());
+                let function_name_table_ptr =
+                    libc::dlsym(lib_handle, function_name_table_name.as_ptr());
+                let function_name_offsets_ptr =
+                    libc::dlsym(lib_handle, function_name_offsets_name.as_ptr());
+                let function_name_count_ptr =
+                    libc::dlsym(lib_handle, function_name_count_name.as_ptr());
 
                 (
                     if table_ptr.is_null() {
@@ -156,6 +171,21 @@ impl CmplogDebugResolver {
                     } else {
                         Some(string_count_ptr)
                     },
+                    if function_name_table_ptr.is_null() {
+                        None
+                    } else {
+                        Some(function_name_table_ptr)
+                    },
+                    if function_name_offsets_ptr.is_null() {
+                        None
+                    } else {
+                        Some(function_name_offsets_ptr)
+                    },
+                    if function_name_count_ptr.is_null() {
+                        None
+                    } else {
+                        Some(function_name_count_ptr)
+                    },
                 )
             };
 
@@ -166,6 +196,9 @@ impl CmplogDebugResolver {
                 mut string_table_ptr,
                 mut string_offsets_ptr,
                 mut string_count_ptr,
+                mut function_name_table_ptr,
+                mut function_name_offsets_ptr,
+                mut function_name_count_ptr,
             );
 
             // First try: RTLD_DEFAULT
@@ -176,6 +209,9 @@ impl CmplogDebugResolver {
                 string_table_ptr,
                 string_offsets_ptr,
                 string_count_ptr,
+                function_name_table_ptr,
+                function_name_offsets_ptr,
+                function_name_count_ptr,
             ) = load_symbols(lib_handle);
 
             // Second try: current executable
@@ -195,6 +231,9 @@ impl CmplogDebugResolver {
                             string_table_ptr,
                             string_offsets_ptr,
                             string_count_ptr,
+                            function_name_table_ptr,
+                            function_name_offsets_ptr,
+                            function_name_count_ptr,
                         ) = load_symbols(lib_handle);
                         libc::dlclose(lib_handle);
                     }
@@ -235,6 +274,41 @@ impl CmplogDebugResolver {
                         let str_bytes = core::slice::from_raw_parts(str_ptr, len);
                         if let Ok(file_path) = std::str::from_utf8(str_bytes) {
                             resolver.add_file_path(file_path.to_string());
+                        }
+                    }
+                }
+            }
+
+            // Load function name table if available
+            if let (
+                Some(function_name_table_ptr),
+                Some(function_name_offsets_ptr),
+                Some(function_name_count_ptr),
+            ) = (
+                function_name_table_ptr,
+                function_name_offsets_ptr,
+                function_name_count_ptr,
+            ) {
+                let function_name_count = ptr::read(function_name_count_ptr as *const u32) as usize;
+                if function_name_count > 0 {
+                    eprintln!("Found {} function names", function_name_count);
+
+                    let function_name_data_ptr = function_name_table_ptr as *const u8;
+                    let function_name_offsets_ptr = function_name_offsets_ptr as *const u32;
+
+                    for i in 0..function_name_count {
+                        let offset = ptr::read(function_name_offsets_ptr.add(i)) as isize;
+                        let str_ptr = function_name_data_ptr.offset(offset);
+
+                        // Read null-terminated string
+                        let mut len = 0;
+                        while ptr::read(str_ptr.add(len)) != 0 {
+                            len += 1;
+                        }
+
+                        let str_bytes = core::slice::from_raw_parts(str_ptr, len);
+                        if let Ok(function_name) = std::str::from_utf8(str_bytes) {
+                            resolver.add_function_name(i as u32, function_name.to_string());
                         }
                     }
                 }
@@ -285,8 +359,8 @@ impl CmplogDebugResolver {
     }
 
     /// Add a function name mapping
-    pub fn add_function_name(&mut self, hash: u16, name: String) {
-        self.function_names.insert(hash, name);
+    pub fn add_function_name(&mut self, index: u32, name: String) {
+        self.function_names.insert(index, name);
     }
 
     /// Resolve debug information for a comparison ID
@@ -323,9 +397,11 @@ impl CmplogDebugResolver {
             .map(|info| info.instruction_addr)
     }
 
-    /// Get the function name for a function hash
-    pub fn get_function_name(&self, func_hash: u16) -> Option<&str> {
-        self.function_names.get(&func_hash).map(|s| s.as_str())
+    /// Get the function name for a function name index
+    pub fn get_function_name(&self, func_name_index: u32) -> Option<&str> {
+        self.function_names
+            .get(&func_name_index)
+            .map(|s| s.as_str())
     }
 
     /// Get full debug information for a comparison ID including resolved names
@@ -342,7 +418,7 @@ impl CmplogDebugResolver {
                 .get_file_path(debug_info.file_path_index)
                 .map(|s| s.to_string()),
             function_name: self
-                .get_function_name(debug_info.func_hash)
+                .get_function_name(debug_info.func_name_index)
                 .map(|s| s.to_string()),
         })
     }

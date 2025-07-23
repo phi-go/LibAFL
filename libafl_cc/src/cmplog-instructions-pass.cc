@@ -57,7 +57,7 @@ struct CmplogDebugInfo {
   uint32_t file_path_index; // Index into string table for source file path
   uint32_t line;       // Source line number
   uint16_t column;     // Source column number
-  uint16_t func_hash;  // Hash of function name
+  uint32_t func_name_index; // Index into function name string table
   uint8_t  cmp_type;   // Type of comparison (0=ICmp, 1=FCmp, 2=Switch)
   uint8_t  reserved;   // Future use
   uint64_t instruction_addr; // Runtime address of the comparison instruction
@@ -67,7 +67,7 @@ struct CmplogDebugInfo {
         file_path_index(0),
         line(0),
         column(0),
-        func_hash(0),
+        func_name_index(0),
         cmp_type(0),
         reserved(0),
         instruction_addr(0) {
@@ -90,7 +90,9 @@ class CmpLogInstructions : public PassInfoMixin<CmpLogInstructions> {
   uint32_t        hashString(const StringRef &str);
   void            createDebugInfoTable(Module &M);
   uint32_t        getOrCreateFilePathIndex(const std::string &file_path);
+  uint32_t        getOrCreateFunctionNameIndex(const std::string &function_name);
   void            createStringTable(Module &M);
+  void            createFunctionNameTable(Module &M);
   bool            be_quiet = true;
 
   // Storage for debug information collected during instrumentation
@@ -99,6 +101,9 @@ class CmpLogInstructions : public PassInfoMixin<CmpLogInstructions> {
   // String table for source file paths
   std::vector<std::string>             file_path_strings;
   std::unordered_map<std::string, uint32_t> file_path_to_index;
+  // String table for function names
+  std::vector<std::string>             function_name_strings;
+  std::unordered_map<std::string, uint32_t> function_name_to_index;
 };
 
 }  // namespace
@@ -147,6 +152,19 @@ uint32_t CmpLogInstructions::getOrCreateFilePathIndex(const std::string &file_pa
   return index;
 }
 
+// Get or create an index for a function name in the string table
+uint32_t CmpLogInstructions::getOrCreateFunctionNameIndex(const std::string &function_name) {
+  auto it = function_name_to_index.find(function_name);
+  if (it != function_name_to_index.end()) {
+    return it->second;
+  }
+  
+  uint32_t index = static_cast<uint32_t>(function_name_strings.size());
+  function_name_strings.push_back(function_name);
+  function_name_to_index[function_name] = index;
+  return index;
+}
+
 // Collect debug information from an instruction
 CmplogDebugInfo CmpLogInstructions::collectDebugInfo(const Instruction *inst,
                                                      uint8_t cmp_type) {
@@ -170,7 +188,7 @@ CmplogDebugInfo CmpLogInstructions::collectDebugInfo(const Instruction *inst,
   // Get function name information
   if (const Function *func = inst->getFunction()) {
     StringRef func_name = func->getName();
-    debug_info.func_hash = hashString(func_name);
+    debug_info.func_name_index = getOrCreateFunctionNameIndex(func_name.str());
   }
 
   // Generate deterministic ID based on collected info
@@ -188,7 +206,7 @@ uint32_t CmpLogInstructions::generateDeterministicId(
   hash ^= static_cast<uint64_t>(debug_info.file_path_index);
   hash ^= static_cast<uint64_t>(debug_info.line) << 16;
   hash ^= static_cast<uint64_t>(debug_info.column) << 8;
-  hash ^= static_cast<uint64_t>(debug_info.func_hash) << 24;
+  hash ^= static_cast<uint64_t>(debug_info.func_name_index) << 24;
   hash ^= static_cast<uint64_t>(debug_info.cmp_type);
 
   // Use xxHash for final mixing - convert to StringRef for LLVM 19
@@ -209,7 +227,7 @@ void CmpLogInstructions::createDebugInfoTable(Module &M) {
       Type::getInt32Ty(C),  // file_path_index
       Type::getInt32Ty(C),  // line
       Type::getInt16Ty(C),  // column
-      Type::getInt16Ty(C),  // func_hash
+      Type::getInt32Ty(C),  // func_name_index
       Type::getInt8Ty(C),   // cmp_type
       Type::getInt8Ty(C),   // reserved
       Type::getInt64Ty(C)   // instruction_addr
@@ -226,7 +244,7 @@ void CmpLogInstructions::createDebugInfoTable(Module &M) {
         ConstantInt::get(Type::getInt32Ty(C), entry.file_path_index),
         ConstantInt::get(Type::getInt32Ty(C), entry.line),
         ConstantInt::get(Type::getInt16Ty(C), entry.column),
-        ConstantInt::get(Type::getInt16Ty(C), entry.func_hash),
+        ConstantInt::get(Type::getInt32Ty(C), entry.func_name_index),
         ConstantInt::get(Type::getInt8Ty(C), entry.cmp_type),
         ConstantInt::get(Type::getInt8Ty(C), entry.reserved),
         ConstantInt::get(Type::getInt64Ty(C), entry.instruction_addr)};
@@ -301,6 +319,54 @@ void CmpLogInstructions::createStringTable(Module &M) {
       "__libafl_cmplog_string_count");
   string_count->setVisibility(GlobalValue::DefaultVisibility);
   string_count->setDSOLocal(false);
+}
+
+// Create embedded function name table
+void CmpLogInstructions::createFunctionNameTable(Module &M) {
+  if (function_name_strings.empty()) return;
+
+  LLVMContext &C = M.getContext();
+
+  // Create a null-terminated string containing all function names
+  std::string combined_strings;
+  std::vector<uint32_t> string_offsets;
+  
+  for (const auto &function_name : function_name_strings) {
+    string_offsets.push_back(static_cast<uint32_t>(combined_strings.size()));
+    combined_strings += function_name;
+    combined_strings += '\0';  // null terminator
+  }
+
+  // Create global string constant
+  Constant *string_data = ConstantDataArray::getString(C, combined_strings, false);
+  GlobalVariable *function_name_table = new GlobalVariable(
+      M, string_data->getType(), true, GlobalValue::ExternalLinkage,
+      string_data, "__libafl_cmplog_function_name_table");
+  function_name_table->setVisibility(GlobalValue::DefaultVisibility);
+  function_name_table->setDSOLocal(false);
+
+  // Create offset table
+  std::vector<Constant *> offset_constants;
+  for (uint32_t offset : string_offsets) {
+    offset_constants.push_back(ConstantInt::get(Type::getInt32Ty(C), offset));
+  }
+
+  ArrayType *offset_array_type = ArrayType::get(Type::getInt32Ty(C), string_offsets.size());
+  Constant *offset_array = ConstantArray::get(offset_array_type, offset_constants);
+  
+  GlobalVariable *offset_table = new GlobalVariable(
+      M, offset_array_type, true, GlobalValue::ExternalLinkage,
+      offset_array, "__libafl_cmplog_function_name_offsets");
+  offset_table->setVisibility(GlobalValue::DefaultVisibility);
+  offset_table->setDSOLocal(false);
+
+  // Create function name count variable
+  GlobalVariable *function_name_count = new GlobalVariable(
+      M, Type::getInt32Ty(C), true, GlobalValue::ExternalLinkage,
+      ConstantInt::get(Type::getInt32Ty(C), function_name_strings.size()),
+      "__libafl_cmplog_function_name_count");
+  function_name_count->setVisibility(GlobalValue::DefaultVisibility);
+  function_name_count->setDSOLocal(false);
 }
 
 bool CmpLogInstructions::hookInstrs(Module &M) {
@@ -910,8 +976,9 @@ bool CmpLogInstructions::hookInstrs(Module &M) {
     }
   }
 
-  // Create the embedded debug information table and string table
+  // Create the embedded debug information table and string tables
   createStringTable(M);
+  createFunctionNameTable(M);
   createDebugInfoTable(M);
 
   return true;
