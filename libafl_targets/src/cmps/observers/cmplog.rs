@@ -62,9 +62,7 @@ where
 
         if self.add_meta {
             let meta = state.metadata_or_insert_with(CmpValuesMetadata::new);
-
             let usable_count = self.usable_count();
-
             meta.add_from(usable_count, self.cmp_map_mut());
         }
 

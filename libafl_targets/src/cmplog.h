@@ -109,7 +109,9 @@ extern uint8_t libafl_cmplog_enabled;
 static inline void cmplog_instructions_checked(uintptr_t k, uint8_t shape,
                                                uint64_t arg1, uint64_t arg2,
                                                uint8_t arg1_is_const) {
-  if (!libafl_cmplog_enabled) { return; }
+  if (!libafl_cmplog_enabled) { 
+    return; 
+  }
   libafl_cmplog_enabled = false;
 
   uint16_t hits;
@@ -129,6 +131,7 @@ static inline void cmplog_instructions_checked(uintptr_t k, uint8_t shape,
   libafl_cmplog_map_ptr->vals.operands[k][hits].v0 = arg1;
   libafl_cmplog_map_ptr->vals.operands[k][hits].v1 = arg2;
   libafl_cmplog_map_ptr->vals.operands[k][hits].v0_is_const = arg1_is_const;
+  
   libafl_cmplog_enabled = true;
 }
 

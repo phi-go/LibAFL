@@ -223,6 +223,10 @@ fn map_cmplog_shared_memory_internal<SHM: ShMemProvider>(
     unsafe {
         EXTENDED_CMPLOG_MAP_PTR = target_ptr;
     }
+    // Enable cmplog after successfully mapping shared memory
+    unsafe {
+        crate::cmps::CMPLOG_ENABLED = 1;
+    }
     Ok(())
 }
 
