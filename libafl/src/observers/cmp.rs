@@ -6,6 +6,7 @@ use alloc::{
 };
 use core::{
     fmt::Debug,
+    mem::size_of,
     ops::{Deref, DerefMut},
 };
 
@@ -87,6 +88,90 @@ impl Default for CmplogDebugResolver {
     }
 }
 
+/// Load CmpLog debug symbols from a library handle using dlsym
+/// Returns tuple of (table_ptr, size_ptr, string_table_ptr, string_offsets_ptr, string_count_ptr,
+/// function_name_table_ptr, function_name_offsets_ptr, function_name_count_ptr)
+#[cfg(feature = "std")]
+unsafe fn load_cmplog_symbols(
+    lib_handle: *mut std::ffi::c_void,
+) -> (
+    Option<*mut std::ffi::c_void>,
+    Option<*mut std::ffi::c_void>,
+    Option<*mut std::ffi::c_void>,
+    Option<*mut std::ffi::c_void>,
+    Option<*mut std::ffi::c_void>,
+    Option<*mut std::ffi::c_void>,
+    Option<*mut std::ffi::c_void>,
+    Option<*mut std::ffi::c_void>,
+) {
+    use libc;
+    use std::ffi::CString;
+
+    let table_name = CString::new("__libafl_cmplog_debug_table").unwrap();
+    let size_name = CString::new("__libafl_cmplog_debug_table_size").unwrap();
+    let string_table_name = CString::new("__libafl_cmplog_string_table").unwrap();
+    let string_offsets_name = CString::new("__libafl_cmplog_string_offsets").unwrap();
+    let string_count_name = CString::new("__libafl_cmplog_string_count").unwrap();
+    let function_name_table_name = CString::new("__libafl_cmplog_function_name_table").unwrap();
+    let function_name_offsets_name = CString::new("__libafl_cmplog_function_name_offsets").unwrap();
+    let function_name_count_name = CString::new("__libafl_cmplog_function_name_count").unwrap();
+
+    let table_ptr = unsafe { libc::dlsym(lib_handle, table_name.as_ptr()) };
+    let size_ptr = unsafe { libc::dlsym(lib_handle, size_name.as_ptr()) };
+    let string_table_ptr = unsafe { libc::dlsym(lib_handle, string_table_name.as_ptr()) };
+    let string_offsets_ptr = unsafe { libc::dlsym(lib_handle, string_offsets_name.as_ptr()) };
+    let string_count_ptr = unsafe { libc::dlsym(lib_handle, string_count_name.as_ptr()) };
+    let function_name_table_ptr =
+        unsafe { libc::dlsym(lib_handle, function_name_table_name.as_ptr()) };
+    let function_name_offsets_ptr =
+        unsafe { libc::dlsym(lib_handle, function_name_offsets_name.as_ptr()) };
+    let function_name_count_ptr =
+        unsafe { libc::dlsym(lib_handle, function_name_count_name.as_ptr()) };
+
+    (
+        if table_ptr.is_null() {
+            None
+        } else {
+            Some(table_ptr)
+        },
+        if size_ptr.is_null() {
+            None
+        } else {
+            Some(size_ptr)
+        },
+        if string_table_ptr.is_null() {
+            None
+        } else {
+            Some(string_table_ptr)
+        },
+        if string_offsets_ptr.is_null() {
+            None
+        } else {
+            Some(string_offsets_ptr)
+        },
+        if string_count_ptr.is_null() {
+            None
+        } else {
+            Some(string_count_ptr)
+        },
+        if function_name_table_ptr.is_null() {
+            None
+        } else {
+            Some(function_name_table_ptr)
+        },
+        if function_name_offsets_ptr.is_null() {
+            None
+        } else {
+            Some(function_name_offsets_ptr)
+        },
+        if function_name_count_ptr.is_null() {
+            None
+        } else {
+            Some(function_name_count_ptr)
+        },
+    )
+}
+
 impl CmplogDebugResolver {
     /// Create a new debug resolver
     pub fn new() -> Self {
@@ -100,110 +185,63 @@ impl CmplogDebugResolver {
     /// Load debug information from embedded executable section
     #[cfg(target_os = "linux")]
     pub fn load_from_executable() -> Result<Self, Error> {
+        // Try to load debug information using dlsym to check for symbol existence
+        // This avoids weak linkage issues and works on stable Rust
+        #[cfg(feature = "std")]
+        {
+            use std::ffi::CString;
+
+            // First try: RTLD_DEFAULT
+            let lib_handle = libc::RTLD_DEFAULT as *mut std::ffi::c_void;
+            let resolver = Self::load_from_lib_handle(lib_handle)?;
+
+            // If we found symbols using RTLD_DEFAULT, return them
+            if !resolver.debug_table.is_empty() {
+                return Ok(resolver);
+            }
+
+            // Second try: current executable
+            // Get current executable path and open it
+            let exe_path = std::fs::read_link("/proc/self/exe")
+                .unwrap_or_else(|_| std::path::PathBuf::from(""));
+
+            if !exe_path.as_os_str().is_empty() {
+                let exe_cstr = CString::new(exe_path.to_string_lossy().as_ref()).unwrap();
+                let lib_handle = unsafe { libc::dlopen(exe_cstr.as_ptr(), libc::RTLD_LAZY) };
+
+                if !lib_handle.is_null() {
+                    let resolver = Self::load_from_lib_handle(lib_handle)?;
+                    unsafe { libc::dlclose(lib_handle) };
+                    return Ok(resolver);
+                }
+            }
+
+            // No debug information found
+            eprintln!("debug symbols not found");
+            Ok(Self::new())
+        }
+
+        #[cfg(not(feature = "std"))]
+        Ok(Self::new())
+    }
+
+    /// Load debug information from embedded executable section
+    #[cfg(not(target_os = "linux"))]
+    pub fn load_from_executable() -> Result<Self, Error> {
+        // Platform not yet supported
+        Ok(Self::new())
+    }
+
+    /// Load debug information from a specific library handle using dlsym
+    /// This allows loading debug symbols from external libraries/executables
+    #[cfg(feature = "std")]
+    pub fn load_from_lib_handle(lib_handle: *mut std::ffi::c_void) -> Result<Self, Error> {
         use core::ptr;
 
         let mut resolver = Self::new();
 
-        // Try to load debug information using dlsym to check for symbol existence
-        // This avoids weak linkage issues and works on stable Rust
-        #[cfg(feature = "std")]
         unsafe {
-            use std::ffi::CString;
-
-            // Helper function to load symbols from a library handle
-            let load_symbols = |lib_handle: *mut std::ffi::c_void| -> (
-                Option<*mut std::ffi::c_void>,
-                Option<*mut std::ffi::c_void>,
-                Option<*mut std::ffi::c_void>,
-                Option<*mut std::ffi::c_void>,
-                Option<*mut std::ffi::c_void>,
-                Option<*mut std::ffi::c_void>,
-                Option<*mut std::ffi::c_void>,
-                Option<*mut std::ffi::c_void>,
-            ) {
-                let table_name = CString::new("__libafl_cmplog_debug_table").unwrap();
-                let size_name = CString::new("__libafl_cmplog_debug_table_size").unwrap();
-                let string_table_name = CString::new("__libafl_cmplog_string_table").unwrap();
-                let string_offsets_name = CString::new("__libafl_cmplog_string_offsets").unwrap();
-                let string_count_name = CString::new("__libafl_cmplog_string_count").unwrap();
-                let function_name_table_name =
-                    CString::new("__libafl_cmplog_function_name_table").unwrap();
-                let function_name_offsets_name =
-                    CString::new("__libafl_cmplog_function_name_offsets").unwrap();
-                let function_name_count_name =
-                    CString::new("__libafl_cmplog_function_name_count").unwrap();
-
-                let table_ptr = libc::dlsym(lib_handle, table_name.as_ptr());
-                let size_ptr = libc::dlsym(lib_handle, size_name.as_ptr());
-                let string_table_ptr = libc::dlsym(lib_handle, string_table_name.as_ptr());
-                let string_offsets_ptr = libc::dlsym(lib_handle, string_offsets_name.as_ptr());
-                let string_count_ptr = libc::dlsym(lib_handle, string_count_name.as_ptr());
-                let function_name_table_ptr =
-                    libc::dlsym(lib_handle, function_name_table_name.as_ptr());
-                let function_name_offsets_ptr =
-                    libc::dlsym(lib_handle, function_name_offsets_name.as_ptr());
-                let function_name_count_ptr =
-                    libc::dlsym(lib_handle, function_name_count_name.as_ptr());
-
-                (
-                    if table_ptr.is_null() {
-                        None
-                    } else {
-                        Some(table_ptr)
-                    },
-                    if size_ptr.is_null() {
-                        None
-                    } else {
-                        Some(size_ptr)
-                    },
-                    if string_table_ptr.is_null() {
-                        None
-                    } else {
-                        Some(string_table_ptr)
-                    },
-                    if string_offsets_ptr.is_null() {
-                        None
-                    } else {
-                        Some(string_offsets_ptr)
-                    },
-                    if string_count_ptr.is_null() {
-                        None
-                    } else {
-                        Some(string_count_ptr)
-                    },
-                    if function_name_table_ptr.is_null() {
-                        None
-                    } else {
-                        Some(function_name_table_ptr)
-                    },
-                    if function_name_offsets_ptr.is_null() {
-                        None
-                    } else {
-                        Some(function_name_offsets_ptr)
-                    },
-                    if function_name_count_ptr.is_null() {
-                        None
-                    } else {
-                        Some(function_name_count_ptr)
-                    },
-                )
-            };
-
-            // Try multiple approaches to get the symbols
             let (
-                mut table_ptr,
-                mut size_ptr,
-                mut string_table_ptr,
-                mut string_offsets_ptr,
-                mut string_count_ptr,
-                mut function_name_table_ptr,
-                mut function_name_offsets_ptr,
-                mut function_name_count_ptr,
-            );
-
-            // First try: RTLD_DEFAULT
-            let lib_handle = libc::RTLD_DEFAULT as *mut std::ffi::c_void;
-            (
                 table_ptr,
                 size_ptr,
                 string_table_ptr,
@@ -212,33 +250,7 @@ impl CmplogDebugResolver {
                 function_name_table_ptr,
                 function_name_offsets_ptr,
                 function_name_count_ptr,
-            ) = load_symbols(lib_handle);
-
-            // Second try: current executable
-            if table_ptr.is_none() || size_ptr.is_none() {
-                // Get current executable path and open it
-                let exe_path = std::fs::read_link("/proc/self/exe")
-                    .unwrap_or_else(|_| std::path::PathBuf::from(""));
-
-                if !exe_path.as_os_str().is_empty() {
-                    let exe_cstr = CString::new(exe_path.to_string_lossy().as_ref()).unwrap();
-                    let lib_handle = libc::dlopen(exe_cstr.as_ptr(), libc::RTLD_LAZY);
-
-                    if !lib_handle.is_null() {
-                        (
-                            table_ptr,
-                            size_ptr,
-                            string_table_ptr,
-                            string_offsets_ptr,
-                            string_count_ptr,
-                            function_name_table_ptr,
-                            function_name_offsets_ptr,
-                            function_name_count_ptr,
-                        ) = load_symbols(lib_handle);
-                        libc::dlclose(lib_handle);
-                    }
-                }
-            }
+            ) = load_cmplog_symbols(lib_handle);
 
             // Check if symbols were found
             if table_ptr.is_none() || size_ptr.is_none() {
@@ -314,7 +326,7 @@ impl CmplogDebugResolver {
                 }
             }
 
-            // The table_size_ptr actually contains the number of entries, not bytes
+            // Load debug table entries
             let num_entries = ptr::read(size_ptr as *const u32) as usize;
             if num_entries == 0 {
                 eprintln!("zero entries");
@@ -336,11 +348,220 @@ impl CmplogDebugResolver {
         Ok(resolver)
     }
 
-    /// Load debug information from embedded executable section
-    #[cfg(not(target_os = "linux"))]
-    pub fn load_from_executable() -> Result<Self, Error> {
-        // Platform not yet supported
+    /// Load debug information from a specific library handle using dlsym
+    /// Platform not yet supported
+    #[cfg(not(feature = "std"))]
+    pub fn load_from_lib_handle(_lib_handle: *mut std::ffi::c_void) -> Result<Self, Error> {
         Ok(Self::new())
+    }
+
+    /// Load debug information from an ELF file (useful for PIE executables)
+    #[cfg(all(feature = "std", feature = "elf_parsing"))]
+    pub fn load_from_file<P: AsRef<std::path::Path>>(file_path: P) -> Result<Self, Error> {
+        use object::{Object, ObjectSection, ObjectSymbol};
+        use std::fs;
+
+        let mut resolver = Self::new();
+
+        // Read the ELF file
+        let file_data = fs::read(file_path.as_ref())
+            .map_err(|e| Error::unknown(format!("Failed to read ELF file: {}", e)))?;
+
+        // Parse the ELF file
+        let obj_file = object::File::parse(&*file_data)
+            .map_err(|e| Error::unknown(format!("Failed to parse ELF file: {}", e)))?;
+
+        // Extract the required symbol addresses and data
+        let mut symbol_data = std::collections::HashMap::new();
+
+        for symbol in obj_file.symbols() {
+            if let Ok(name) = symbol.name() {
+                let symbol_key = match name {
+                    "__libafl_cmplog_debug_table" => Some("debug_table"),
+                    "__libafl_cmplog_debug_table_size" => Some("debug_table_size"),
+                    "__libafl_cmplog_string_table" => Some("string_table"),
+                    "__libafl_cmplog_string_offsets" => Some("string_offsets"),
+                    "__libafl_cmplog_string_count" => Some("string_count"),
+                    "__libafl_cmplog_function_name_table" => Some("function_name_table"),
+                    "__libafl_cmplog_function_name_offsets" => Some("function_name_offsets"),
+                    "__libafl_cmplog_function_name_count" => Some("function_name_count"),
+                    _ => None,
+                };
+
+                if let Some(key) = symbol_key {
+                    if let Some(section_index) = symbol.section_index() {
+                        if let Ok(section) = obj_file.section_by_index(section_index) {
+                            if let Ok(data) = section.data() {
+                                let symbol_offset = symbol.address() - section.address();
+                                let symbol_size = symbol.size() as usize;
+                                if symbol_size > 0
+                                    && symbol_offset + symbol_size as u64 <= data.len() as u64
+                                {
+                                    let symbol_data_slice = &data[symbol_offset as usize
+                                        ..(symbol_offset as usize + symbol_size)];
+                                    symbol_data.insert(key, symbol_data_slice);
+                                } else {
+                                    symbol_data.insert(key, data);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check if we have the minimum required symbols
+        let debug_table_data = symbol_data.get("debug_table");
+        let debug_table_size_data = symbol_data.get("debug_table_size");
+
+        if debug_table_data.is_none() || debug_table_size_data.is_none() {
+            eprintln!("debug symbols not found in ELF file");
+            return Ok(resolver);
+        }
+
+        let debug_table_data: &[u8] = debug_table_data.unwrap();
+        let debug_table_size_data = debug_table_size_data.unwrap();
+
+        // Parse debug table size
+        if debug_table_size_data.len() < 4 {
+            return Err(Error::unknown("Invalid debug table size data".to_string()));
+        }
+        let table_size = u32::from_ne_bytes([
+            debug_table_size_data[0],
+            debug_table_size_data[1],
+            debug_table_size_data[2],
+            debug_table_size_data[3],
+        ]) as usize;
+
+        eprintln!("Found debug table with {} entries", table_size);
+
+        // Parse debug table entries
+        let entry_size = size_of::<CmplogDebugInfo>();
+        let expected_table_size = table_size * entry_size;
+
+        if debug_table_data.len() < expected_table_size {
+            return Err(Error::unknown(format!(
+                "Debug table data too small: expected {}, got {}",
+                expected_table_size,
+                debug_table_data.len()
+            )));
+        }
+
+        for i in 0..table_size {
+            let offset = i * entry_size;
+            let entry_data = &debug_table_data[offset..offset + entry_size];
+
+            // Parse CmplogDebugInfo structure
+            unsafe {
+                let debug_info = std::ptr::read(entry_data.as_ptr() as *const CmplogDebugInfo);
+                resolver.debug_table.insert(debug_info.id, debug_info);
+            }
+        }
+
+        // Load string table if available
+        if let (Some(string_table_data), Some(string_offsets_data), Some(string_count_data)) = (
+            symbol_data.get("string_table"),
+            symbol_data.get("string_offsets"),
+            symbol_data.get("string_count"),
+        ) {
+            if string_count_data.len() >= 4 {
+                let string_count = u32::from_ne_bytes([
+                    string_count_data[0],
+                    string_count_data[1],
+                    string_count_data[2],
+                    string_count_data[3],
+                ]) as usize;
+
+                eprintln!("Found {} file path strings", string_count);
+
+                let offsets_per_entry = size_of::<u32>();
+                if string_offsets_data.len() >= string_count * offsets_per_entry {
+                    for i in 0..string_count {
+                        let offset_idx = i * offsets_per_entry;
+                        let offset = u32::from_ne_bytes([
+                            string_offsets_data[offset_idx],
+                            string_offsets_data[offset_idx + 1],
+                            string_offsets_data[offset_idx + 2],
+                            string_offsets_data[offset_idx + 3],
+                        ]) as usize;
+
+                        if offset < string_table_data.len() {
+                            // Find null terminator
+                            let mut end = offset;
+                            while end < string_table_data.len() && string_table_data[end] != 0 {
+                                end += 1;
+                            }
+
+                            if let Ok(file_path) =
+                                std::str::from_utf8(&string_table_data[offset..end])
+                            {
+                                resolver.add_file_path(file_path.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Load function name table if available
+        if let (
+            Some(function_name_table_data),
+            Some(function_name_offsets_data),
+            Some(function_name_count_data),
+        ) = (
+            symbol_data.get("function_name_table"),
+            symbol_data.get("function_name_offsets"),
+            symbol_data.get("function_name_count"),
+        ) {
+            if function_name_count_data.len() >= 4 {
+                let function_name_count = u32::from_ne_bytes([
+                    function_name_count_data[0],
+                    function_name_count_data[1],
+                    function_name_count_data[2],
+                    function_name_count_data[3],
+                ]) as usize;
+
+                eprintln!("Found {} function names", function_name_count);
+
+                let offsets_per_entry = size_of::<u32>();
+                if function_name_offsets_data.len() >= function_name_count * offsets_per_entry {
+                    for i in 0..function_name_count {
+                        let offset_idx = i * offsets_per_entry;
+                        let offset = u32::from_ne_bytes([
+                            function_name_offsets_data[offset_idx],
+                            function_name_offsets_data[offset_idx + 1],
+                            function_name_offsets_data[offset_idx + 2],
+                            function_name_offsets_data[offset_idx + 3],
+                        ]) as usize;
+
+                        if offset < function_name_table_data.len() {
+                            // Find null terminator
+                            let mut end = offset;
+                            while end < function_name_table_data.len()
+                                && function_name_table_data[end] != 0
+                            {
+                                end += 1;
+                            }
+
+                            if let Ok(function_name) =
+                                std::str::from_utf8(&function_name_table_data[offset..end])
+                            {
+                                resolver.add_function_name(i as u32, function_name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(resolver)
+    }
+
+    #[cfg(not(all(feature = "std", feature = "elf_parsing")))]
+    pub fn load_from_file<P: AsRef<std::path::Path>>(_file_path: P) -> Result<Self, Error> {
+        Err(Error::unknown(
+            "ELF parsing not available - enable 'elf_parsing' feature".to_string(),
+        ))
     }
 
     /// Add a debug info entry manually (useful for testing)
